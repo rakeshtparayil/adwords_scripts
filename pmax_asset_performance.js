@@ -8,7 +8,7 @@
 
 function main() {
   // Configuration
-  const SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/1qEtXesjbzlViX7Uvbwj6cRMorEi6C0To46IWpGfqlfE/edit?usp=sharing"; // Replace with your Google Sheet URL
+  const SPREADSHEET_URL = "YOUR SPREADSHEET UEL"; // Replace with your Google Sheet URL
   const DATE_RANGE = "LAST_30_DAYS";
   
   // Initialize spreadsheet
