@@ -1,0 +1,543 @@
+/**
+ * OPTIMIZATION SCORE TRACKER WITH EMAIL REPORT
+ * 
+ * Tracks optimization scores at campaign and account level
+ * Sends professional HTML email alerts for campaigns below threshold
+ * 
+ * Original concept by: Tibbe van Asten (Adsscripts.com)
+ * Enhanced with: Professional email formatting and detailed reporting
+ * 
+ * FEATURES:
+ * - Campaign-level optimization score tracking
+ * - Account-level optimization score summary
+ * - Email alerts for campaigns below threshold
+ * - Historical data storage in Google Sheets
+ * - Professional HTML email formatting
+ */
+
+// ============================================================
+// CONFIGURATION
+// ============================================================
+
+var CONFIG = {
+  
+  // Enable/disable logging
+  LOG: true,
+  
+  // Optimization score threshold (campaigns below this will be highlighted)
+  OPTISCORE_THRESHOLD: 75,
+  
+  // Email settings
+  EMAIL_REPORT: true,
+  EMAIL_RECIPIENTS: "mail2@gmail.com, mail@gmail.com",  // Add multiple emails separated by commas: "email1@example.com, email2@example.com"
+  
+  // Currency conversion (AED to USD)
+  CURRENCY_CODE: "USD",
+  CONVERT_TO_USD: true,
+  CONVERSION_RATE: 0.27  // AED to USD rate (1 AED = 0.27 USD)
+  
+};
+
+// ============================================================
+// MAIN FUNCTION
+// ============================================================
+
+function main() {
+  
+  Logger.log("=== Optimization Score Tracker Started ===");
+  
+  try {
+    
+    // Date setup
+    var today = new Date();
+    var reportDate = new Date(today);
+    reportDate.setDate(reportDate.getDate() - 1);
+    
+    // Collect campaign data for current period (yesterday)
+    Logger.log("Collecting campaign optimization scores (yesterday)...");
+    var campaignData = collectCampaignData(reportDate);
+    
+    // Collect campaign data for previous period (same day last week)
+    Logger.log("Collecting campaign optimization scores (same day last week for trends)...");
+    var previousCampaignData = collectPreviousCampaignData(reportDate);
+    
+    // Process campaign data
+    var belowThresholdCount = 0;
+    var totalCampaigns = campaignData.length;
+    var avgOptiScore = 0;
+    
+    for (var i = 0; i < campaignData.length; i++) {
+      var campaign = campaignData[i];
+      
+      // Check if below threshold
+      if (campaign.optiScore < CONFIG.OPTISCORE_THRESHOLD) {
+        belowThresholdCount++;
+      }
+      
+      avgOptiScore += campaign.optiScore;
+    }
+    
+    if (totalCampaigns > 0) {
+      avgOptiScore = avgOptiScore / totalCampaigns;
+    }
+    
+    // Collect account-level data
+    Logger.log("Collecting account-level optimization score...");
+    var accountData = collectAccountData();
+    
+    // Send email with all campaigns
+    if (CONFIG.EMAIL_REPORT && campaignData.length > 0) {
+      sendEmailReport(campaignData, belowThresholdCount, accountData, totalCampaigns, avgOptiScore, reportDate, previousCampaignData);
+    } else {
+      Logger.log("No campaigns found. No email sent.");
+    }
+    
+    Logger.log("=== Optimization Score Tracker Completed Successfully ===");
+    Logger.log("Total campaigns: " + totalCampaigns);
+    Logger.log("Campaigns below threshold: " + belowThresholdCount);
+    Logger.log("Account OptiScore: " + accountData.optiScore.toFixed(2) + "%");
+    
+  } catch (error) {
+    Logger.log("ERROR: " + error.message);
+    Logger.log("Stack: " + error.stack);
+    
+    // Send error email
+    if (CONFIG.EMAIL_REPORT) {
+      MailApp.sendEmail({
+        to: CONFIG.EMAIL_RECIPIENTS,
+        subject: "❌ OptiScore Tracker Error - " + AdsApp.currentAccount().getName(),
+        htmlBody: "<p>An error occurred while running the Optimization Score Tracker:</p>" +
+                  "<p><strong>Error:</strong> " + error.message + "</p>" +
+                  "<p><strong>Stack:</strong> " + error.stack + "</p>"
+      });
+    }
+  }
+  
+}
+
+// ============================================================
+// DATA COLLECTION FUNCTIONS
+// ============================================================
+
+function collectCampaignData(reportDate) {
+  
+  var campaignData = [];
+  
+  // Format yesterday's date
+  var yesterday = new Date(reportDate);
+  var dateFormat = function(date) {
+    var year = date.getFullYear();
+    var month = String(date.getMonth() + 1).padStart(2, '0');
+    var day = String(date.getDate()).padStart(2, '0');
+    return year + month + day;
+  };
+  
+  // Query for yesterday only
+  var query = 
+    "SELECT " +
+    "  campaign.name, " +
+    "  campaign.id, " +
+    "  campaign.optimization_score, " +
+    "  campaign.status, " +
+    "  campaign.advertising_channel_type, " +
+    "  metrics.impressions, " +
+    "  metrics.clicks, " +
+    "  metrics.cost_micros, " +
+    "  metrics.conversions " +
+    "FROM campaign " +
+    "WHERE campaign.status = 'ENABLED' " +
+    "  AND campaign.serving_status = 'SERVING' " +
+    "  AND segments.date = '" + dateFormat(yesterday) + "'";
+  
+  var report = AdsApp.report(query);
+  var rows = report.rows();
+  
+  // Collect data by campaign
+  var campaignMap = {};
+  
+  while (rows.hasNext()) {
+    var row = rows.next();
+    var campaignId = row['campaign.id'];
+    var optiScore = parseFloat(row['campaign.optimization_score']) || null;
+    var costMicros = parseFloat(row['metrics.cost_micros']) || 0;
+    var cost = costMicros / 1000000;
+    
+    // Convert currency if needed
+    if (CONFIG.CONVERT_TO_USD) {
+      cost = cost * CONFIG.CONVERSION_RATE;
+    }
+    
+    var channelType = row['campaign.advertising_channel_type'];
+    
+    // Log campaign type for debugging
+    if (CONFIG.LOG && optiScore !== null && optiScore > 0) {
+      Logger.log("Campaign: " + row['campaign.name'] + " | Type: " + channelType + " | OptiScore: " + (optiScore * 100).toFixed(1) + "%");
+    }
+    
+    // Skip campaigns without optimization score
+    if (optiScore === null || optiScore === 0) {
+      if (CONFIG.LOG) {
+        Logger.log("Skipping campaign (no OptiScore): " + row['campaign.name'] + " (Type: " + channelType + ")");
+      }
+      continue;
+    }
+    
+    // Note: As of 2024-2025, Google Ads now provides optimization scores for Performance Max campaigns
+    // Previously, PMax campaigns did not have optimization scores, but this has changed
+    
+    campaignMap[campaignId] = {
+      name: row['campaign.name'],
+      id: campaignId,
+      optiScore: optiScore * 100,
+      status: row['campaign.status'],
+      channelType: channelType,
+      impressions: parseInt(row['metrics.impressions']) || 0,
+      clicks: parseInt(row['metrics.clicks']) || 0,
+      cost: cost,
+      conversions: parseFloat(row['metrics.conversions']) || 0
+    };
+  }
+  
+  // Convert map to array and sort by cost (highest first)
+  for (var id in campaignMap) {
+    campaignData.push(campaignMap[id]);
+  }
+  
+  campaignData.sort(function(a, b) {
+    return b.cost - a.cost;
+  });
+  
+  return campaignData;
+  
+}
+
+function collectPreviousCampaignData(currentReportDate) {
+  
+  var campaignMap = {};
+  
+  // Calculate same day last week (7 days before the report date)
+  var lastWeekSameDay = new Date(currentReportDate);
+  lastWeekSameDay.setDate(lastWeekSameDay.getDate() - 7);
+  
+  var dateFormat = function(date) {
+    var year = date.getFullYear();
+    var month = String(date.getMonth() + 1).padStart(2, '0');
+    var day = String(date.getDate()).padStart(2, '0');
+    return year + month + day;
+  };
+  
+  if (CONFIG.LOG) {
+    Logger.log("Querying data for: " + lastWeekSameDay.toLocaleDateString("en-US"));
+  }
+  
+  var queryPrevious = 
+    "SELECT " +
+    "  campaign.name, " +
+    "  campaign.id, " +
+    "  campaign.optimization_score, " +
+    "  campaign.advertising_channel_type, " +
+    "  metrics.cost_micros " +
+    "FROM campaign " +
+    "WHERE segments.date = '" + dateFormat(lastWeekSameDay) + "'";
+  
+  try {
+    var reportPrevious = AdsApp.report(queryPrevious);
+    var rowsPrevious = reportPrevious.rows();
+    
+    while (rowsPrevious.hasNext()) {
+      var row = rowsPrevious.next();
+      var campaignId = row['campaign.id'];
+      var optiScore = parseFloat(row['campaign.optimization_score']) || null;
+      var costMicros = parseFloat(row['metrics.cost_micros']) || 0;
+      var cost = costMicros / 1000000;
+      
+      // Convert currency if needed
+      if (CONFIG.CONVERT_TO_USD) {
+        cost = cost * CONFIG.CONVERSION_RATE;
+      }
+      
+      // Skip campaigns without optimization score
+      if (optiScore === null || optiScore === 0) {
+        continue;
+      }
+      
+      campaignMap[campaignId] = {
+        id: campaignId,
+        name: row['campaign.name'],
+        optiScore: optiScore * 100,
+        cost: cost
+      };
+    }
+    
+    if (CONFIG.LOG) {
+      Logger.log("Found " + Object.keys(campaignMap).length + " campaigns from previous period");
+    }
+    
+  } catch (e) {
+    Logger.log("Warning: Could not fetch previous period data: " + e.message);
+  }
+  
+  return campaignMap;
+  
+}
+
+function collectAccountData() {
+  
+  var query = 
+    "SELECT " +
+    "  customer.optimization_score, " +
+    "  customer.optimization_score_weight " +
+    "FROM customer";
+  
+  var report = AdsApp.report(query);
+  var rows = report.rows();
+  
+  var accountData = {
+    optiScore: 0,
+    optiScoreWeight: 0
+  };
+  
+  if (rows.hasNext()) {
+    var row = rows.next();
+    accountData.optiScore = (parseFloat(row['customer.optimization_score']) || 0) * 100;
+    accountData.optiScoreWeight = parseFloat(row['customer.optimization_score_weight']) || 0;
+  }
+  
+  return accountData;
+  
+}
+
+// ============================================================
+// EMAIL REPORT FUNCTION
+// ============================================================
+
+function sendEmailReport(campaigns, belowThresholdCount, accountData, totalCampaigns, avgOptiScore, reportDate, previousCampaignData) {
+  
+  Logger.log("Sending email report...");
+  
+  var accountName = AdsApp.currentAccount().getName();
+  var accountId = AdsApp.currentAccount().getCustomerId();
+  
+  // Build campaign rows
+  var campaignRows = "";
+  var totalCost = 0;
+  var totalConversions = 0;
+  
+  for (var i = 0; i < campaigns.length; i++) {
+    var campaign = campaigns[i];
+    var ctr = campaign.impressions > 0 ? (campaign.clicks / campaign.impressions * 100) : 0;
+    var cpa = campaign.conversions > 0 ? (campaign.cost / campaign.conversions) : 0;
+    
+    totalCost += campaign.cost;
+    totalConversions += campaign.conversions;
+    
+    // Get previous period data for cost trend (same day last week)
+    var previousCost = null;
+    var costTrendIndicator = "";
+    var costTrendColor = "#666";
+    
+    if (previousCampaignData && previousCampaignData[campaign.id]) {
+      previousCost = previousCampaignData[campaign.id].cost;
+      
+      // Cost trend
+      if (previousCost > 0) {
+        var costDiff = campaign.cost - previousCost;
+        var costDiffPercent = (costDiff / previousCost) * 100;
+        
+        if (costDiffPercent > 5) {
+          costTrendIndicator = " ↑ (+" + costDiffPercent.toFixed(1) + "%)";
+          costTrendColor = "#d32f2f"; // Red for cost increase
+        } else if (costDiffPercent < -5) {
+          costTrendIndicator = " ↓ (" + costDiffPercent.toFixed(1) + "%)";
+          costTrendColor = "#4caf50"; // Green for cost decrease
+        } else {
+          costTrendIndicator = " → (0%)";
+          costTrendColor = "#999"; // Gray for stable
+        }
+      }
+    }
+    
+    // Color code based on score
+    var scoreColor = "#4caf50"; // Green (default for good scores)
+    var rowBgColor = "#ffffff"; // White background default
+    
+    if (campaign.optiScore < CONFIG.OPTISCORE_THRESHOLD) {
+      rowBgColor = "#fff3cd"; // Light yellow background for below threshold
+    }
+    
+    if (campaign.optiScore >= 90) {
+      scoreColor = "#4caf50"; // Green
+    } else if (campaign.optiScore >= 70) {
+      scoreColor = "#f57c00"; // Orange
+    } else if (campaign.optiScore >= 50) {
+      scoreColor = "#fbc02d"; // Yellow
+    } else {
+      scoreColor = "#d32f2f"; // Red
+    }
+    
+    campaignRows += 
+      '<tr style="border-bottom: 1px solid #e0e0e0; background-color: ' + rowBgColor + ';">' +
+      '  <td style="padding: 12px 8px; text-align: left;">' + campaign.name + '</td>' +
+      '  <td style="padding: 12px 8px; text-align: center; font-weight: bold; color: ' + scoreColor + ';">' + 
+           campaign.optiScore.toFixed(1) + '%' +
+      '  </td>' +
+      '  <td style="padding: 12px 8px; text-align: right;">' +
+           '<span style="font-weight: bold;">$' + campaign.cost.toFixed(2) + '</span>' +
+           '<span style="font-size: 11px; color: ' + costTrendColor + ';">' + costTrendIndicator + '</span>' +
+      '  </td>' +
+      '  <td style="padding: 12px 8px; text-align: right;">' + campaign.conversions.toFixed(1) + '</td>' +
+      '  <td style="padding: 12px 8px; text-align: right;">$' + (cpa > 0 ? cpa.toFixed(2) : '0.00') + '</td>' +
+      '  <td style="padding: 12px 8px; text-align: right;">' + campaign.impressions.toLocaleString() + '</td>' +
+      '  <td style="padding: 12px 8px; text-align: right;">' + campaign.clicks.toLocaleString() + '</td>' +
+      '  <td style="padding: 12px 8px; text-align: right;">' + ctr.toFixed(2) + '%</td>' +
+      '</tr>';
+  }
+  
+  // Determine account score color
+  var accountScoreColor = "#4caf50"; // Green
+  if (accountData.optiScore < 90) {
+    accountScoreColor = "#f57c00"; // Orange
+  }
+  if (accountData.optiScore < 70) {
+    accountScoreColor = "#d32f2f"; // Red
+  }
+  
+  // Build HTML email
+  var htmlBody = 
+    '<!DOCTYPE html>' +
+    '<html>' +
+    '<head>' +
+    '  <meta charset="utf-8">' +
+    '  <meta name="viewport" content="width=device-width, initial-scale=1.0">' +
+    '</head>' +
+    '<body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; margin: 0; padding: 0; background-color: #f5f5f5;">' +
+    '  <div style="max-width: 800px; margin: 20px auto; background-color: #ffffff; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">' +
+    
+    // Header
+    '    <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; text-align: center;">' +
+    '      <h1 style="margin: 0; font-size: 28px; font-weight: 600;">⚠️ Optimization Score Alert</h1>' +
+    '      <p style="margin: 10px 0 0 0; font-size: 16px; opacity: 0.95;">' + accountName + '</p>' +
+    '      <p style="margin: 5px 0 0 0; font-size: 14px; opacity: 0.9;">Account ID: ' + accountId + '</p>' +
+    '    </div>' +
+    
+    // Date info
+    '    <div style="background-color: #f8f9fa; padding: 15px 30px; border-bottom: 1px solid #e0e0e0;">' +
+    '      <p style="margin: 0; font-size: 14px; color: #666;">' +
+    '        <strong>Report Date:</strong> ' + reportDate.toLocaleDateString("en-US", { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' }) + '<br>' +
+    '        <strong>Comparison:</strong> vs. Same Day Last Week | <strong>Currency:</strong> USD (converted from AED at 0.27 rate)' +
+    '      </p>' +
+    '    </div>' +
+    
+    // Summary boxes
+    '    <div style="padding: 30px;">' +
+    '      <div style="display: table; width: 100%; margin-bottom: 30px;">' +
+    '        <div style="display: table-cell; width: 25%; padding: 20px; background-color: #f8f9fa; border-radius: 8px; text-align: center; margin-right: 10px;">' +
+    '          <div style="font-size: 32px; font-weight: bold; color: ' + accountScoreColor + ';">' + accountData.optiScore.toFixed(1) + '%</div>' +
+    '          <div style="font-size: 14px; color: #666; margin-top: 5px;">Account OptiScore</div>' +
+    '        </div>' +
+    '        <div style="display: table-cell; width: 25%; padding: 20px; background-color: #f8f9fa; border-radius: 8px; text-align: center; margin: 0 10px;">' +
+    '          <div style="font-size: 32px; font-weight: bold; color: #d32f2f;">' + belowThresholdCount + '</div>' +
+    '          <div style="font-size: 14px; color: #666; margin-top: 5px;">Campaigns Below ' + CONFIG.OPTISCORE_THRESHOLD + '%</div>' +
+    '        </div>' +
+    '        <div style="display: table-cell; width: 25%; padding: 20px; background-color: #f8f9fa; border-radius: 8px; text-align: center; margin: 0 10px;">' +
+    '          <div style="font-size: 28px; font-weight: bold; color: #1976d2;">$' + totalCost.toFixed(2) + '</div>' +
+    '          <div style="font-size: 14px; color: #666; margin-top: 5px;">Total Cost (USD)</div>' +
+    '        </div>' +
+    '        <div style="display: table-cell; width: 25%; padding: 20px; background-color: #f8f9fa; border-radius: 8px; text-align: center; margin-left: 10px;">' +
+    '          <div style="font-size: 32px; font-weight: bold; color: #4caf50;">' + totalConversions.toFixed(1) + '</div>' +
+    '          <div style="font-size: 14px; color: #666; margin-top: 5px;">Total Conv.</div>' +
+    '        </div>' +
+    '      </div>' +
+    
+      // Alert message (only show if there are campaigns below threshold)
+    (belowThresholdCount > 0 ? 
+    '      <div style="background-color: #fff3cd; border-left: 4px solid #ffc107; padding: 15px; margin-bottom: 30px; border-radius: 4px;">' +
+    '        <p style="margin: 0; color: #856404;">' +
+    '          <strong>⚠️ Action Required:</strong> ' + belowThresholdCount + ' campaign(s) have an Optimization Score below ' + CONFIG.OPTISCORE_THRESHOLD + '%. ' +
+    '          Review the recommendations in your Google Ads account to improve performance.' +
+    '        </p>' +
+    '      </div>' : 
+    '      <div style="background-color: #d4edda; border-left: 4px solid #28a745; padding: 15px; margin-bottom: 30px; border-radius: 4px;">' +
+    '        <p style="margin: 0; color: #155724;">' +
+    '          <strong>✅ Great Job!</strong> All campaigns are above the ' + CONFIG.OPTISCORE_THRESHOLD + '% optimization score threshold!' +
+    '        </p>' +
+    '      </div>') +
+    
+    // What is OptiScore section
+    '      <div style="background-color: #e3f2fd; border-left: 4px solid #2196f3; padding: 15px; margin-bottom: 30px; border-radius: 4px;">' +
+    '        <h3 style="margin: 0 0 10px 0; color: #1565c0; font-size: 16px;">📊 About Optimization Score</h3>' +
+    '        <p style="margin: 0 0 10px 0; font-size: 14px; color: #0d47a1; line-height: 1.6;">' +
+    '          Optimization Score ranges from 0-100% and estimates how well your Google Ads account is set to perform. ' +
+    '          A score of 100% means your account can perform at its full potential. The score is based on statistics, settings, ' +
+    '          and the status of your account and campaigns, along with available recommendations.' +
+    '        </p>' +
+    '        <p style="margin: 0; font-size: 13px; color: #0d47a1;">' +
+    '          <strong>Cost Trend Indicators:</strong> Compares yesterday vs. same day last week (e.g., Monday vs. previous Monday)<br>' +
+    '          <span style="color: #4caf50;">↓ Green</span> = Cost Decreased | ' +
+    '          <span style="color: #d32f2f;">↑ Red</span> = Cost Increased | ' +
+    '          <span style="color: #999;">→ Gray</span> = Cost Stable' +
+    '        </p>' +
+    '      </div>' +
+    
+      // Campaigns table
+    '      <h2 style="color: #333; font-size: 20px; margin: 0 0 20px 0; padding-bottom: 10px; border-bottom: 2px solid #667eea;">All Campaigns - Optimization Score Report</h2>' +
+    '      <div style="overflow-x: auto;">' +
+    '        <table style="width: 100%; border-collapse: collapse; font-size: 14px;">' +
+    '          <thead>' +
+    '            <tr style="background-color: #f5f5f5; border-bottom: 2px solid #667eea;">' +
+    '              <th style="padding: 12px 8px; text-align: left; font-weight: 600; color: #333;">Campaign</th>' +
+    '              <th style="padding: 12px 8px; text-align: center; font-weight: 600; color: #333;">OptiScore</th>' +
+    '              <th style="padding: 12px 8px; text-align: right; font-weight: 600; color: #333;">Cost (USD)<br><span style="font-size: 10px; font-weight: normal; color: #666;">(vs same day last week)</span></th>' +
+    '              <th style="padding: 12px 8px; text-align: right; font-weight: 600; color: #333;">Conv.</th>' +
+    '              <th style="padding: 12px 8px; text-align: right; font-weight: 600; color: #333;">CPA</th>' +
+    '              <th style="padding: 12px 8px; text-align: right; font-weight: 600; color: #333;">Impr.</th>' +
+    '              <th style="padding: 12px 8px; text-align: right; font-weight: 600; color: #333;">Clicks</th>' +
+    '              <th style="padding: 12px 8px; text-align: right; font-weight: 600; color: #333;">CTR</th>' +
+    '            </tr>' +
+    '          </thead>' +
+    '          <tbody>' +
+    campaignRows +
+    '          </tbody>' +
+    '        </table>' +
+    '      </div>' +
+    
+      // Action steps
+    '      <div style="margin-top: 30px; padding: 20px; background-color: #f8f9fa; border-radius: 8px;">' +
+    '        <h3 style="margin: 0 0 15px 0; color: #333; font-size: 18px;">💡 Recommended Actions</h3>' +
+    '        <ol style="margin: 0; padding-left: 20px; color: #666; font-size: 14px; line-height: 1.8;">' +
+    '          <li>Review the <strong>Recommendations</strong> page in your Google Ads account</li>' +
+    '          <li>Apply relevant recommendations to improve campaign performance</li>' +
+    '          <li>Focus on campaigns with the lowest optimization scores first (highlighted in yellow)</li>' +
+    '          <li>Check for budget constraints, keyword opportunities, and ad improvements</li>' +
+    '          <li>Monitor score and cost trends week-over-week</li>' +
+    '        </ol>' +
+    '      </div>' +
+    
+    '    </div>' +
+    
+    // Footer
+    '    <div style="background-color: #f8f9fa; padding: 20px 30px; text-align: center; border-top: 1px solid #e0e0e0;">' +
+    '      <p style="margin: 0; font-size: 12px; color: #999;">' +
+    '        This is an automated report from Google Ads Scripts<br>' +
+    '        Generated on ' + new Date().toLocaleString("en-US") +
+    '      </p>' +
+    '    </div>' +
+    
+    '  </div>' +
+    '</body>' +
+    '</html>';
+  
+  // Send email
+  var emailSubject = belowThresholdCount > 0 
+    ? "⚠️ OptiScore Alert: " + belowThresholdCount + " Campaign(s) Below " + CONFIG.OPTISCORE_THRESHOLD + "% - " + accountName
+    : "✅ OptiScore Report: All Campaigns Above " + CONFIG.OPTISCORE_THRESHOLD + "% - " + accountName;
+  
+  MailApp.sendEmail({
+    to: CONFIG.EMAIL_RECIPIENTS,
+    subject: emailSubject,
+    htmlBody: htmlBody
+  });
+  
+  Logger.log("Email sent successfully to: " + CONFIG.EMAIL_RECIPIENTS);
+  
+}
